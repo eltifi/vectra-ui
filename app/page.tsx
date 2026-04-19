@@ -135,7 +135,7 @@ export default function Home() {
     useEffect(() => {
         const loadScenarios = async () => {
             try {
-                const response = await fetch('/api/hurricane-scenarios');
+                const response = await fetch('/api/scenarios');
                 if (response.ok) {
                     const data = await response.json();
                     setScenarios(data.scenarios);

@@ -1,46 +1,13 @@
 /**
  * @file ControlPanel.tsx
  * @brief User control interface for VECTRA UI evacuation simulator
- * @details
- * Control panel component for configuring simulation parameters:
- * - Disaster/evacuation scenario selection (pre-defined or custom)
- * - Regional selection (22 Florida metro areas)
- * - Custom event parameters (direction, velocity/wind speed)
- * - Contraflow mode toggle
- * 
- * Features:
- * - Fetches predefined scenarios from backend API
- * - Dynamic scenario data loading with error handling
- * - Region selection with scenario validation
- * - Real-time parameter input with validation
- * - Affected regions display with warning styling
- * - Error messaging via alerts
- * - Cookie consent aware (only shows affected regions if user accepted)
- * 
- * @see ControlPanelProps interface for props
- * @see DisasterScenario interface for scenario data
  */
 
 'use client';
 
 import { useState, useEffect } from 'react';
+import CapacityChart from './CapacityChart';
 
-/**
- * @brief Props for ControlPanel component
- * @details
- * State setters for all simulation parameters controlled by the UI.
- * 
- * @param showContraflow Boolean toggle for contraflow visualization mode
- * @param setShowContraflow Setter for contraflow mode
- * @param region Selected Florida region (string key from REGIONS map)
- * @param setRegion Setter for region selection
- * @param eventDirection Movement bearing (0-360 degrees, 0=North)
- * @param setEventDirection Setter for direction
- * @param eventVelocity Speed parameter in mph
- * @param setEventVelocity Setter for speed parameter
- * @param affectedRegions Array of regions impacted by scenario
- * @param setAffectedRegions Setter for affected regions list
- */
 interface ControlPanelProps {
     showContraflow: boolean;
     setShowContraflow: (s: boolean) => void;
@@ -56,23 +23,6 @@ interface ControlPanelProps {
     setAffectedRegions: (r: string[]) => void;
 }
 
-/**
- * @brief Disaster/evacuation scenario data structure
- * @details
- * Loaded from backend API /api/scenarios endpoint.
- * Represents a pre-defined evacuation scenario with parameters.
- * 
- * @param id Unique identifier (e.g., "cat3_tampa_bay")
- * @param label Display name for UI (e.g., "Category 3 - Tampa Bay")
- * @param category Severity category (e.g., 1-5 for hurricanes)
- * @param windSpeed Maximum sustained wind speed or equivalent (mph)
- * @param pressureMb Atmospheric pressure or equivalent metric (millibars)
- * @param latitude Latitude of event center
- * @param longitude Longitude of event center
- * @param direction Movement direction (0-360 degrees)
- * @param translationSpeed Forward speed of event (mph)
- * @param affectedRegions Array of region names impacted by scenario
- */
 interface DisasterScenario {
     id: string;
     label: string;
@@ -86,38 +36,30 @@ interface DisasterScenario {
     affectedRegions: string[];
 }
 
-/**
- * @brief ControlPanel component - main user interface
- * @details
- * Floating Material-UI panel positioned at top-right of screen.
- * Provides controls for:
- * 1. Hurricane scenario selection (dropdown fetched from API)
- * 2. Region selection (dropdown of 15 Florida areas)
- * 3. Custom hurricane parameters (direction 0-360°, velocity 0+ mph)
- * 4. Contraflow mode toggle button
- * 
- * Features:
- * - Automatic scenario data loading from backend on mount
- * - Dynamic region list from fetched scenarios
- * - Validation: clamps direction to [0, 360], velocity to [0, ∞)
- * - Affected regions warning display with highlighting
- * - Error alerts via Snackbar component
- * - Responsive Material-UI styling with glassmorphism backdrop
- * 
- * @param props ControlPanelProps - all state management props
- * @returns JSX.Element - Material-UI Paper panel with controls
- * 
- * @complexity State management: O(n) for scenario lookups where n = number of scenarios
- * @note Scenarios are fetched on mount (once), then cached in component state
- */
+interface SimulationResult {
+    scenario: string;
+    max_throughput_vph: number;
+    clearance_time_hours: number;
+    gridlock_risk: string;
+}
+
+interface CompareResult {
+    region: string;
+    baseline: SimulationResult;
+    contraflow: SimulationResult;
+    comparison: {
+        throughput_gain_pct: number;
+        time_saved_hours: number;
+        recommendation: 'CONTRAFLOW_RECOMMENDED' | 'BASELINE_SUFFICIENT';
+    };
+}
+
 export default function ControlPanel({
     showContraflow,
     setShowContraflow,
     region,
     setRegion,
-    eventDirection,
     setEventDirection,
-    eventVelocity,
     setEventVelocity,
     setEventLatitude,
     setEventLongitude,
@@ -125,287 +67,185 @@ export default function ControlPanel({
     setAffectedRegions
 }: ControlPanelProps) {
     const [scenario, setScenario] = useState('None');
-    const [loading, setLoading] = useState(false);
     const [errorMsg, setErrorMsg] = useState<string | null>(null);
     const [scenarios, setScenarios] = useState<DisasterScenario[]>([]);
     const [scenariosLoading, setScenariosLoading] = useState(true);
+    const [isCollapsed, setIsCollapsed] = useState(false);
+    const [simData, setSimData] = useState<{scenario: string, throughput: number}[]>([]);
+    const [comparison, setComparison] = useState<CompareResult['comparison'] | null>(null);
+    const [simLoading, setSimLoading] = useState(false);
 
-    /**
-     * @brief Load scenarios from backend API
-     * @details
-     * Fetches predefined scenarios on component mount.
-     * Populates dropdown menu with available scenarios.
-     * Handles fetch errors with error message display.
-     * Sets loading state during fetch operation.
-     * 
-     * API Endpoint: GET /api/scenarios
-     * Response Format: { scenarios: DisasterScenario[] }
-     * 
-     * Dependencies: None (runs once on mount)
-     */
-    // Load scenarios from backend
+    // Load scenarios
     useEffect(() => {
         const loadScenarios = async () => {
             try {
-                // Try primary API first (from env or default)
-                const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
-                let response;
-
-                try {
-                    response = await fetch(`${apiUrl}/scenarios`);
-                    if (!response.ok) throw new Error('Primary API failed');
-                } catch (primaryError) {
-                    console.warn('Primary API unavailable, falling back to local mock:', primaryError);
-                    // Fallback to local next.js API
-                    response = await fetch('/api/scenarios');
-                }
-
-                if (!response || !response.ok) {
-                    throw new Error('Failed to load scenarios from both primary and fallback');
-                }
+                const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8787';
+                const response = await fetch(`${apiUrl}/scenarios`);
+                if (!response.ok) throw new Error('Failed to load scenarios');
                 const data = await response.json();
                 setScenarios(data.scenarios);
             } catch (error) {
                 console.error('Error loading scenarios:', error);
-                setErrorMsg('Failed to load scenarios - Backend unavailable');
+                setErrorMsg('Backend unavailable');
             } finally {
                 setScenariosLoading(false);
             }
         };
-
         loadScenarios();
     }, []);
 
-    /**
-     * @brief Create lookup map for quick scenario data access
-     * @details
-     * Converts scenarios array to Record (object) keyed by scenario.id
-     * Enables O(1) scenario data lookup in event handlers.
-     * Updated whenever scenarios array changes (only on mount in practice).
-     * 
-     * @type Record<string, ScenarioData>
-     * @complexity O(n) where n = number of scenarios (only on data load)
-     */
-    // Create scenario lookup from fetched data
-    const SCENARIOS = scenarios.reduce((acc, scenarioItem) => {
-        acc[scenarioItem.id] = {
-            id: scenarioItem.id,
-            label: scenarioItem.label,
-            category: scenarioItem.category,
-            windSpeed: scenarioItem.windSpeed,
-            pressureMb: scenarioItem.pressureMb,
-            latitude: scenarioItem.latitude,
-            longitude: scenarioItem.longitude,
-            direction: scenarioItem.direction,
-            translationSpeed: scenarioItem.translationSpeed,
-            affectedRegions: scenarioItem.affectedRegions
+    // Fetch simulation data when scenario or region changes
+    useEffect(() => {
+        if (scenario === 'None') {
+            setSimData([]);
+            setComparison(null);
+            return;
+        }
+
+        const fetchSim = async () => {
+            setSimLoading(true);
+            try {
+                const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8787';
+                const res = await fetch(`${apiUrl}/simulate/compare?region=${encodeURIComponent(region)}`);
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                const data: CompareResult = await res.json();
+
+                setSimData([
+                    { scenario: 'Baseline',   throughput: data.baseline.max_throughput_vph },
+                    { scenario: 'Contraflow', throughput: data.contraflow.max_throughput_vph },
+                ]);
+                setComparison(data.comparison);
+            } catch (err) {
+                console.error("Sim fetch error:", err);
+                setComparison(null);
+            } finally {
+                setSimLoading(false);
+            }
         };
-        return acc;
-    }, {} as Record<string, DisasterScenario>);
 
-    /**
-     * @brief Handle region selection change
-     * @details
-     * Updates selected region and validates against current scenario.
-     * If new region is not in affected regions, clears scenario and contraflow mode.
-     * Persists selection to localStorage (if cookies accepted).
-     * 
-     * @param newRegion The newly selected region value
-     * @returns void
-     * 
-     * Side Effects:
-     * - Updates region state
-     * - Clears scenario if region mismatch
-     * - Saves to localStorage (if GDPR consent given)
-     */
-    const handleRegionChange = (newRegion: string) => {
-        setRegion(newRegion);
+        fetchSim();
+    }, [scenario, region]);
 
-        // If user manually changes region and it's not in the affected regions, clear the scenario
-        if (affectedRegions.length > 0 && !affectedRegions.includes(newRegion)) {
-            setScenario('None');
-            setAffectedRegions([]);
-            setShowContraflow(false);
-        }
-
-        // Only save to localStorage if user accepted cookies
-        const cookieConsent = localStorage.getItem('vectra_cookie_consent');
-        if (cookieConsent === 'accepted') {
-            localStorage.setItem('vectra_region', newRegion);
-        }
-    };
-
-    /**
-     * @brief Handle scenario selection
-     * @details
-     * Updates all simulation parameters from selected scenario:
-     * - Sets direction, velocity, affected regions
-     * - Auto-enables contraflow mode if scenario selected
-     * - Auto-selects first affected region
-     * - Persists selection to localStorage
-     * 
-     * Special Case:
-     * - "None" scenario clears affected regions but preserves selected region
-     * - Disables contraflow to show baseline routing
-     * 
-     * @param scenarioId The selected scenario ID
-     * @returns void
-     * 
-     * @note Uses SCENARIOS lookup map for O(1) parameter retrieval
-     */
     const handleScenarioChange = (scenarioId: string) => {
         setScenario(scenarioId);
-
-        const scenarioData = SCENARIOS[scenarioId];
+        const scenarioData = scenarios.find(s => s.id === scenarioId);
         if (scenarioData) {
             setEventDirection(scenarioData.direction);
             setEventVelocity(scenarioData.windSpeed);
             setEventLatitude(scenarioData.latitude);
             setEventLongitude(scenarioData.longitude);
             setAffectedRegions(scenarioData.affectedRegions);
-
-            // Auto-enable contraflow if scenario is not 'None'
-            if (scenarioId !== 'None') {
-                setShowContraflow(true);
-                // Auto-select first affected region only if scenario is not 'None'
-                if (scenarioData.affectedRegions.length > 0) {
-                    setRegion(scenarioData.affectedRegions[0]);
-                }
-            } else {
-                setShowContraflow(false);
-                // Don't change region when scenario is None - keep user's selected region
-            }
-
-            // Save to localStorage only if user accepted cookies
-            const cookieConsent = localStorage.getItem('vectra_cookie_consent');
-            if (cookieConsent === 'accepted') {
-                localStorage.setItem('vectra_scenario', scenarioId);
+            setShowContraflow(scenarioId !== 'None');
+            if (scenarioId !== 'None' && scenarioData.affectedRegions.length > 0) {
+                setRegion(scenarioData.affectedRegions[0]);
             }
         }
     };
 
-    /**
-     * @brief Handle direction input change
-     * @details
-     * Validates and clamps direction value to [0, 360] degrees.
-     * 0° = North, 90° = East, 180° = South, 270° = West
-     * Handles non-numeric input by defaulting to 0.
-     * 
-     * @param event React input change event
-     * @returns void
-     * 
-     * @note Clamping: Math.max(0, Math.min(360, value))
-     */
-    const handleDirectionChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-        const value = Math.max(0, Math.min(360, parseFloat(event.target.value) || 0));
-        setEventDirection(value);
-    };
-
-    /**
-     * @brief Handle velocity (speed parameter) input change
-     * @details
-     * Validates and ensures velocity is non-negative.
-     * Handles non-numeric input by defaulting to 0.
-     * No upper limit to accommodate various scenarios.
-     * 
-     * @param event React input change event  
-     * @returns void
-     * 
-     * @note Validation: Math.max(0, value) ensures velocity >= 0
-     */
-    const handleVelocityChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-        const value = Math.max(0, parseFloat(event.target.value) || 0);
-        setEventVelocity(value);
-    };
+    if (isCollapsed) {
+        return (
+            <button 
+                onClick={() => setIsCollapsed(false)}
+                className="fixed top-5 right-5 z-[9999] p-3 rounded-full bg-blue-600 text-white shadow-xl hover:bg-blue-700 transition-all"
+            >
+                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+            </button>
+        );
+    }
 
     return (
-        <div className="fixed top-5 right-5 z-[9999] w-80 p-4 rounded-lg bg-white/95 backdrop-blur-sm shadow-lg">
-            <div className="mb-4 pb-3 border-b border-gray-200">
-                <h2 className="text-xl font-bold text-blue-600 mb-1">VECTRA UI</h2>
-                <h3 className="text-sm font-bold text-red-600 mb-2">Evacuation Control</h3>
-                <p className="text-xs text-gray-600 leading-relaxed mb-2">
-                    <strong>VECTRA UI</strong> (Vehicle Evacuation Counterflow Traffic Resilience Application) simulates <strong>Evacuation</strong> scenarios.
-                </p>
-                <p className="text-xs text-gray-600 leading-relaxed">
-                    Enables <strong>Contraflow Lane Reversal</strong> on major evacuation routes and <strong>Toll Roads</strong> (I-75, I-95, I-4, I-10, Turnpike) based on disaster event trajectory.
-                </p>
-            </div>
-
-            <div className="mb-4">
-                <label htmlFor="evacuation-scenario" className="block text-sm font-bold text-gray-800 mb-2">Evacuation Scenario</label>
-                <select
-                    id="evacuation-scenario"
-                    value={scenario}
-                    onChange={(e) => handleScenarioChange(e.target.value)}
-                    disabled={scenariosLoading}
-                    className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                    <option value="None">None</option>
-                    {scenarios.map((scenarioItem) => (
-                        <option key={scenarioItem.id} value={scenarioItem.id}>{scenarioItem.label}</option>
-                    ))}
-                </select>
-            </div>
-
-            {affectedRegions.length > 0 && (
-                <div className="mb-4 p-2 rounded-md bg-yellow-100 border border-yellow-400">
-                    <p className="text-xs font-bold text-yellow-800 mb-1">⚠️ Affected Regions:</p>
-                    <p className="text-xs text-yellow-800">{affectedRegions.join(', ')}</p>
+        <div className="fixed top-5 right-5 z-[9999] w-80 max-h-[90vh] overflow-y-auto p-4 rounded-xl bg-slate-900/95 backdrop-blur-md border border-slate-700 shadow-2xl text-slate-200 scrollbar-hide">
+            <div className="flex justify-between items-center mb-4 pb-2 border-b border-slate-700">
+                <div>
+                    <h2 className="text-xl font-black text-blue-400 tracking-tighter">VECTRA</h2>
+                    <p className="text-[10px] text-slate-400 uppercase font-bold tracking-widest">Evacuation Control</p>
                 </div>
-            )}
-
-            <div className="mb-4">
-                <label htmlFor="region-select" className="block text-sm font-bold text-gray-800 mb-2">Select Region for Detail</label>
-                <select
-                    id="region-select"
-                    value={region}
-                    onChange={(e) => handleRegionChange(e.target.value)}
-                    className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                >
-                    <option value="Tampa Bay">Tampa Bay</option>
-                    <option value="Orlando">Orlando</option>
-                    <option value="Miami">Miami</option>
-                    <option value="Jacksonville">Jacksonville</option>
-                    <option value="Tallahassee">Tallahassee</option>
-                    <option value="Pensacola">Pensacola</option>
-                    <option value="Lakeland-Winter Haven">Lakeland-Winter Haven</option>
-                    <option value="Cape Coral-Fort Myers">Cape Coral-Fort Myers</option>
-                    <option value="Sarasota-North Port">Sarasota-North Port</option>
-                    <option value="Daytona Beach">Daytona Beach-Deltona</option>
-                    <option value="Palm Bay-Melbourne">Palm Bay-Melbourne</option>
-                    <option value="Port St. Lucie">Port St. Lucie</option>
-                    <option value="Ocala">Ocala</option>
-                    <option value="Gainesville">Gainesville</option>
-                    <option value="Naples-Marco Island">Naples-Marco Island</option>
-                </select>
+                <button onClick={() => setIsCollapsed(true)} className="p-1 hover:bg-slate-800 rounded text-slate-400">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m18 15-6-6-6 6"/></svg>
+                </button>
             </div>
 
-            {/* Removed Direction and Velocity inputs as per request */}
+            <div className="space-y-4">
+                <section>
+                    <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Scenario</label>
+                    <select
+                        value={scenario}
+                        onChange={(e) => handleScenarioChange(e.target.value)}
+                        className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                    >
+                        <option value="None">Baseline (No Event)</option>
+                        {scenarios.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}
+                    </select>
+                </section>
 
-            <button
-                onClick={() => setShowContraflow(!showContraflow)}
-                className={`w-full font-bold py-2 px-4 rounded-lg text-sm transition-colors mb-3 ${showContraflow
-                    ? 'bg-red-500 hover:bg-red-600 text-white'
-                    : 'bg-blue-500 hover:bg-blue-600 text-white'
-                    }`}
-            >
-                {showContraflow ? 'Hide Contraflow' : 'Show Contraflow'}
-            </button>
+                <section>
+                    <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Region</label>
+                    <select
+                        value={region}
+                        onChange={(e) => setRegion(e.target.value)}
+                        className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                    >
+                        {["Tampa Bay", "Orlando", "Miami", "Jacksonville", "Tallahassee", "Pensacola", "Naples-Marco Island"].map(r => (
+                            <option key={r} value={r}>{r}</option>
+                        ))}
+                    </select>
+                </section>
+
+                {simLoading ? (
+                    <div className="h-48 flex items-center justify-center text-xs text-slate-500 animate-pulse">
+                        Calculating Network Flow...
+                    </div>
+                ) : (
+                    simData.length > 0 && (
+                        <>
+                            <CapacityChart data={simData} />
+                            {comparison && (
+                                <div className={`mt-2 p-2 rounded-lg border text-[11px] space-y-1 ${
+                                    comparison.recommendation === 'CONTRAFLOW_RECOMMENDED'
+                                        ? 'bg-blue-900/30 border-blue-500/40 text-blue-300'
+                                        : 'bg-slate-800/60 border-slate-600/40 text-slate-400'
+                                }`}>
+                                    <div className="font-bold uppercase tracking-wide">
+                                        {comparison.recommendation === 'CONTRAFLOW_RECOMMENDED'
+                                            ? '⟳ Contraflow Recommended'
+                                            : '✓ Baseline Sufficient'}
+                                    </div>
+                                    <div className="flex justify-between">
+                                        <span>Throughput gain</span>
+                                        <span className="font-mono font-semibold">
+                                            {comparison.throughput_gain_pct > 0 ? '+' : ''}{comparison.throughput_gain_pct}%
+                                        </span>
+                                    </div>
+                                    <div className="flex justify-between">
+                                        <span>Time saved</span>
+                                        <span className="font-mono font-semibold">
+                                            {comparison.time_saved_hours > 0
+                                                ? `${comparison.time_saved_hours}h`
+                                                : '—'}
+                                        </span>
+                                    </div>
+                                </div>
+                            )}
+                        </>
+                    )
+                )}
+
+                <button
+                    onClick={() => setShowContraflow(!showContraflow)}
+                    className={`w-full py-3 rounded-lg text-sm font-bold transition-all transform active:scale-95 ${
+                        showContraflow ? 'bg-red-500 hover:bg-red-600' : 'bg-blue-500 hover:bg-blue-600'
+                    } text-white shadow-lg`}
+                >
+                    {showContraflow ? 'Disable Contraflow' : 'Enable Contraflow'}
+                </button>
+            </div>
 
             {errorMsg && (
-                <div className="p-3 rounded-md bg-red-50 border border-red-300">
-                    <div className="flex justify-between items-start gap-2">
-                        <p className="text-sm text-red-700">{errorMsg}</p>
-                        <button
-                            onClick={() => setErrorMsg(null)}
-                            className="text-red-700 hover:text-red-900 font-bold text-lg leading-none"
-                        >
-                            ✕
-                        </button>
-                    </div>
+                <div className="mt-4 p-2 bg-red-900/30 border border-red-500/50 rounded text-[11px] text-red-400 flex justify-between">
+                    {errorMsg}
+                    <button onClick={() => setErrorMsg(null)}>✕</button>
                 </div>
             )}
         </div>
     );
 }
-

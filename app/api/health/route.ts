@@ -2,24 +2,17 @@
  * @file route.ts
  * @brief Backend Health Check API Route
  * @details
- * Aggregates health status from Redis cache and downstream backend API.
- * Returns a unified SystemHealth object used by the frontend to determine maintenance mode.
- * 
- * Logic:
- * 1. Checks Redis connection (critical for session/caching).
- * 2. Pings backend API (http://localhost:8000) for database status.
- * 3. Returns 503 Service Unavailable if any critical component fails.
+ * Aggregates health status from downstream Hono backend API.
+ * Uses Edge Runtime for compatibility with Cloudflare Pages.
  * 
  * @author Vectra Project
- * @date 2025-12-13
+ * @date 2026-04-11
  */
 
 import { NextResponse } from 'next/server';
-import redis from '@/lib/redis';
 import { HealthStatus, SystemHealth } from '@/types/health';
 
-export const dynamic = 'force-dynamic';
-// Force rebuild
+export const runtime = 'edge';
 
 export async function GET() {
     const health: SystemHealth = {
@@ -32,58 +25,34 @@ export async function GET() {
                 component: 'database'
             },
             cache: {
-                status: HealthStatus.UNKNOWN,
-                message: 'Pending check',
+                status: HealthStatus.HEALTHY,
+                message: 'Cloudflare Edge Cache (KV) - Managed by Backend',
                 component: 'cache'
             }
         },
         lastChecked: new Date()
     };
 
-    // 1. Check Redis (Frontend Cache)
+    // 1. Check Backend API
+    const apiUrl = process.env.API_URL || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8787';
     try {
-        if (!redis) {
-            throw new Error('Redis client not initialized');
-        }
-        await redis.ping();
-        health.components.cache = {
-            status: HealthStatus.HEALTHY,
-            message: 'Redis connection successful',
-            component: 'cache'
-        };
-    } catch (error: any) {
-        health.status = HealthStatus.UNHEALTHY;
-        health.message = 'System Maintenance: Cache Unavailable';
-        health.components.cache = {
-            status: HealthStatus.UNHEALTHY,
-            message: 'Redis connection failed',
-            component: 'cache',
-            error: error.message
-        };
-    }
-
-    // 2. Check Backend API
-    const apiUrl = process.env.API_URL || 'http://localhost:8000';
-    try {
-        const response = await fetch(`${apiUrl}/health`);
+        const response = await fetch(`${apiUrl}/health`, { cache: 'no-store' });
         const data = await response.json();
 
-        // Update database status from backend response if available
-        if (data.components && data.components.database) {
-            health.components.database = data.components.database;
-        } else {
-            // Fallback if backend doesn't provide detailed component info
+        if (response.ok && data.status === "healthy") {
             health.components.database = {
-                status: response.ok ? HealthStatus.HEALTHY : HealthStatus.UNHEALTHY,
-                message: response.ok ? 'Backend Reachable' : 'Backend Error',
+                status: HealthStatus.HEALTHY,
+                message: 'D1 Database Connected',
                 component: 'database'
-            }
-        }
-
-        // If backend reports unhealthy, assume system is unhealthy
-        if (data.status === HealthStatus.UNHEALTHY || !response.ok) {
+            };
+        } else {
             health.status = HealthStatus.UNHEALTHY;
-            health.message = data.message || 'System Maintenance: Backend Unavailable';
+            health.message = 'System Maintenance: Backend Issues';
+            health.components.database = {
+                status: HealthStatus.UNHEALTHY,
+                message: data.error || 'Backend reported unhealthy status',
+                component: 'database'
+            };
         }
 
     } catch (error: any) {
